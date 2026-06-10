@@ -1,0 +1,74 @@
+default:
+  provider: "gigachat" #"ollama"       
+  model: "GigaChat:latest" #"qwen2.5-coder:14b"
+  temperature: 0.0
+
+tasks:
+  site_finder:
+    provider: "gigachat"
+    model: "GigaChat:latest" #дешёвый очень, слабый, но под простые задачки - ок
+    temperature: 0.0
+
+  simple_classifier:
+    provider: "gigachat"
+    model: "GigaChat:latest" #дешёвый очень, слабый, но под простые задачки - ок
+    temperature: 0.0
+
+  scout_agent:
+      provider: "google" 
+      model: "gemma-4-31b-it"
+      temperature: 0.0
+      fallbacks:
+      - provider: "google"
+        model: "gemini-3.1-flash-lite-preview"
+      - provider: "google"
+        model: "gemini-2.5-flash"
+      - provider: "google"
+        model: "gemini-2.5-flash-lite"
+
+  email_letter:
+    provider: "google" # "OpenRouter"
+    model: "gemini-3.1-flash-lite-preview"
+    temperature: 0.0
+
+  form_agent:
+    provider: "google" # "OpenRouter"
+    model: "gemini-3.1-flash-lite-preview" # "baidu/cobuddy:free" # deepseek/deepseek-v4-flash:free
+    temperature: 0.0
+    fallbacks:
+      - provider: "google"
+        model: "gemma-4-31b-it"
+      - provider: "google"
+        model: "gemini-3.1-flash-lite-preview"
+      - provider: "google"
+        model: "gemini-2.5-flash-lite"
+
+  router_agent:
+    provider: "google" # "OpenRouter"
+    model: "gemini-3.1-flash-lite-preview" # "baidu/cobuddy:free" # deepseek/deepseek-v4-flash:free
+    temperature: 0.0
+    fallbacks:
+      - provider: "google"
+        model: "gemma-4-31b-it"
+      - provider: "google"
+        model: "gemini-3.1-flash-lite-preview"
+      - provider: "google"
+        model: "gemini-2.5-flash-lite"
+
+  browser_agent:
+    provider: "google" # "google" 
+    model: "gemini-3.1-flash-lite-preview" # "gemini-3.1-flash-lite-preview" - быстрая # gemini-2.5-flash - быстрая # gemma-4-31b-it - медленная # gemini-2.5-flash-lite # gemma-4-26b-a4b-it
+    temperature: 0.0
+
+  gen_query:
+    provider: "google"     
+    model: "gemini-3.1-flash-lite-preview" 
+    temperature: 0.0
+
+  vacancy_selector:
+    provider: "google" # "OpenRouter"
+    model: "gemini-3.1-flash-lite-preview" # "baidu/cobuddy:free" # deepseek/deepseek-v4-flash:free
+    temperature: 0.0
+    fallbacks:
+      - provider: "google"
+        model: "gemma-4-31b-it"
