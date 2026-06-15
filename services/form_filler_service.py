@@ -5,6 +5,7 @@ from playwright.async_api import Page
 from services.llm_client import submit_prompt
 from core.config import settings
 from services.page_analyzer import analyze_page
+from schemas.application import FormFillReport, FormFillStatus
 
 
 class FormFillerOrchestrator:
@@ -193,7 +194,43 @@ class FormFillerOrchestrator:
                 });
             });
 
-            // 4. Поиск красного текста (ошибки валидации)
+            // 4. Каптчи (только видимые). LLM сама решит, мешает ли каптча форме
+            const captchaSelector = [
+                'iframe[src*="recaptcha" i]', 'iframe[src*="hcaptcha" i]',
+                'iframe[src*="captcha" i]', 'iframe[src*="turnstile" i]',
+                'iframe[src*="smartcaptcha" i]',
+                '.g-recaptcha', '.h-captcha', '.cf-turnstile',
+                '[class*="smart-captcha" i]', '[data-testid*="captcha" i]',
+                '[class*="captcha" i]', '[id*="captcha" i]'
+            ].join(', ');
+            const seenCaptchaContainers = new Set();
+            document.querySelectorAll(captchaSelector).forEach(el => {
+                if (!isVisible(el)) return;
+                // не плодим дубли (iframe внутри .g-recaptcha и т.п.)
+                const container = el.closest('form, [class*="form" i], [class*="modal" i], [class*="popup" i]') || el;
+                if (seenCaptchaContainers.has(container)) return;
+                seenCaptchaContainers.add(container);
+
+                const inForm = !!el.closest('form, [class*="form" i], [class*="modal" i], [class*="popup" i]');
+                const sig = (
+                    (typeof el.className === 'string' ? el.className : '') + ' ' +
+                    (el.getAttribute('src') || '') + ' ' +
+                    (el.getAttribute('data-testid') || '') + ' ' +
+                    (el.id || '')
+                ).toLowerCase();
+                const provider = /smartcaptcha|smart-captcha|checkboxcaptcha|recaptcha|hcaptcha|turnstile|yandexcloud|grecaptcha/.test(sig);
+                elements.push({
+                    id: getBotId(el),
+                    tag: el.tagName.toLowerCase(),
+                    type: 'captcha',
+                    context: 'ВИДЖЕТ КАПТЧИ'
+                        + (inForm ? ' (внутри формы отклика!)' : '')
+                        + (provider ? ' [известный провайдер — пройти автоматически нельзя]' : ''),
+                    in_form: inForm,
+                    provider: provider
+                });
+            });
+
             document.querySelectorAll('.error, .invalid, [class*="error"], [style*="color: red"]').forEach(el => {
                 if (el.offsetWidth > 0 && el.innerText.trim().length > 0) {
                     errors.push(el.innerText.trim());
@@ -268,10 +305,8 @@ class FormFillerOrchestrator:
 
         self._log(f"[FormFiller] найдена модалка, триггер: '{modal_trigger}'")
 
-        # Ждём — вдруг page_analyzer уже кликнул в своём JS-контексте
         await page.wait_for_timeout(1500)
 
-        # Проверяем, появились ли поля
         has_inputs = await page.evaluate(r"""
             () => Array.from(document.querySelectorAll(
                 'input:not([type="hidden"]):not([type="file"]), textarea'
@@ -286,7 +321,6 @@ class FormFillerOrchestrator:
             self._log("[FormFiller] поля уже видны — модалка открыта")
             return True
 
-        # Если нет — кликаем сами
         return await self._click_modal_trigger(page, modal_trigger)
 
     async def _click_modal_trigger(self, page, trigger_text: str) -> bool:
@@ -341,14 +375,83 @@ class FormFillerOrchestrator:
         self._log("[FormFiller] клик прошёл, но поля не появились")
         return False
 
+    async def _verify_submission(self, page: Page) -> tuple[FormFillStatus, str]:
+        """
+        Смотрим, не вылезли ли ошибки валидации и не встала ли каптча.
+        """
+        await page.wait_for_timeout(3000)
+
+        try:
+            elements, errors = await self.extract_dom_state(page)
+        except Exception as e:
+            return (
+                FormFillStatus.SUBMITTED,
+                f"страница сменилась после сабмита ({str(e).splitlines()[0]})",
+            )
+
+        captcha_block = [
+            e
+            for e in elements
+            if e.get("type") == "captcha" and (e.get("provider") or e.get("in_form"))
+        ]
+        if captcha_block:
+            return (
+                FormFillStatus.BLOCKED_CAPTCHA,
+                "после сабмита появилась/осталась каптча, блокирующая отправку",
+            )
+
+        if errors:
+            return (
+                FormFillStatus.FILL_FAILED,
+                f"после сабмита остались ошибки валидации: {errors[:300]}",
+            )
+
+        return FormFillStatus.SUBMITTED, "ошибок после сабмита не обнаружено"
+
+    @staticmethod
+    def _parse_agent_report(plan: list) -> tuple[list, dict | None]:
+        """Вынимает из плана действие 'report' (самоотчёт агента), если оно есть."""
+        agent_report = None
+        rest = []
+        for action_obj in plan:
+            if action_obj.get("action") == "report":
+                agent_report = action_obj
+            else:
+                rest.append(action_obj)
+        return rest, agent_report
+
+    def _make_report(
+        self,
+        status: FormFillStatus,
+        detail: str,
+        step: int,
+        unfilled: list | None = None,
+        fields_filled: int = 0,
+        captcha_detected: bool = False,
+    ) -> FormFillReport:
+        report = FormFillReport(
+            status=status,
+            detail=detail,
+            unfilled_fields=unfilled or [],
+            steps_used=step,
+            fields_filled=fields_filled,
+            captcha_detected=captcha_detected,
+        )
+        self._log(f"[FormFiller] итог: {report.status.value} — {report.detail}")
+        return report
+
     async def run_loop(
         self, page: Page, candidate_resume: str, resume_path: str, max_steps: int = 4
-    ):
+    ) -> FormFillReport:
         self._log(f"\n[FormFiller] заполнение формы, максимум шагов - {max_steps}")
 
         dry_run = False
 
         submit_done = False
+
+        saw_form_fields = False  # видели ли вообще поля ввода за все шаги
+        fields_filled = 0  # сколько реальных полей кандидата реально заполнили
+        step = 0
 
         await self._try_open_modal(page)
 
@@ -359,6 +462,27 @@ class FormFillerOrchestrator:
             self._log(f"   собрано элементов: {len(elements)}")
             if errors:
                 self._log(f"   ошибки на странице: {errors[:100]}...")
+
+            if any(
+                e.get("tag") in ("input", "textarea", "select")
+                and e.get("type") not in ("submit", "button")
+                for e in elements
+            ):
+                saw_form_fields = True
+
+            captcha_block = any(
+                e.get("type") == "captcha" and (e.get("provider") or e.get("in_form"))
+                for e in elements
+            )
+            if captcha_block:
+                self._log("   [КАПТЧА] обнаружен блокирующий виджет — стоп")
+                return self._make_report(
+                    FormFillStatus.BLOCKED_CAPTCHA,
+                    "на странице каптча, блокирующая отправку (пройти автоматически нельзя)",
+                    step,
+                    fields_filled=fields_filled,
+                    captcha_detected=True,
+                )
 
             JUNK_BUTTON_TEXTS = {
                 "войти",
@@ -434,6 +558,7 @@ class FormFillerOrchestrator:
             #        f"   [DEBUG phone] id={e['id']} current_value={repr(e['current_value'])} phone_prefix={repr(e.get('phone_prefix',''))} is_phone={e.get('is_phone')}"
             #    )
 
+            response = None
             try:
                 response = await submit_prompt(
                     template_name="form_filler",
@@ -455,7 +580,26 @@ class FormFillerOrchestrator:
             except Exception as e:
                 self._log(f"   ошибка LLM: {e}")
                 self._log(f"   сырой ответ модели: {response}")
-                break
+                return self._make_report(
+                    FormFillStatus.FILL_FAILED, f"ошибка LLM: {e}", step
+                )
+
+            plan, agent_report = self._parse_agent_report(plan)
+            if agent_report:
+                raw_status = str(agent_report.get("status", "fill_failed"))
+                try:
+                    status = FormFillStatus(raw_status)
+                except ValueError:
+                    status = FormFillStatus.FILL_FAILED
+                return self._make_report(
+                    status,
+                    agent_report.get("detail", "")
+                    or f"агент вернул report: {raw_status}",
+                    step,
+                    agent_report.get("unfilled_fields") or [],
+                    fields_filled=fields_filled,
+                    captcha_detected=(status == FormFillStatus.BLOCKED_CAPTCHA),
+                )
 
             if not plan:
                 self._log("   LLM вернула пустой план (или всё заполнено). конец.")
@@ -580,6 +724,7 @@ class FormFillerOrchestrator:
                                 str(val),
                             )
                         actions_executed += 1
+                        fields_filled += 1  # реально заполнили поле кандидата
 
                     elif action_type == "click":
                         self._log(f"   Клик по [{bot_id}]")
@@ -691,6 +836,9 @@ class FormFillerOrchestrator:
                             file_chooser = await fc_info.value
                             await file_chooser.set_files(resume_path)
                         actions_executed += 1
+                        fields_filled += (
+                            1  # загрузили резюме — реальное действие по форме
+                        )
                         await locator.evaluate(
                             "el => el.setAttribute('data-bot-uploaded', 'true')"
                         )
@@ -717,12 +865,36 @@ class FormFillerOrchestrator:
                     )
 
             if dry_run:
-                self._log("   [DRY_RUN] оркестратор мгновенно прерван, сабмит отменен")
-                return "dry_run"
+                if fields_filled == 0:
+                    self._log(
+                        "   [DRY_RUN] сабмит без единого заполненного поля — формы тут нет"
+                    )
+                    return self._make_report(
+                        FormFillStatus.FORM_NOT_FOUND,
+                        "дошли до сабмита, не заполнив ни одного поля — формы отклика на странице нет",
+                        step,
+                        fields_filled=0,
+                    )
+                self._log(
+                    f"   [DRY_RUN] сабмит отменён, заполнено полей: {fields_filled}"
+                )
+                return self._make_report(
+                    FormFillStatus.FILLED_DRY_RUN,
+                    f"форма заполнена ({fields_filled} полей), сабмит отменён (DRY_RUN)",
+                    step,
+                    fields_filled=fields_filled,
+                )
 
             if submit_done:
-                self._log("   сабмит выполнен, выходим из цикла")
-                break
+                self._log("   сабмит выполнен, проверяю результат...")
+                status, detail = await self._verify_submission(page)
+                return self._make_report(
+                    status,
+                    detail,
+                    step,
+                    fields_filled=fields_filled,
+                    captcha_detected=(status == FormFillStatus.BLOCKED_CAPTCHA),
+                )
 
             if actions_executed == 0:
                 self._log("   ни одно действие не выполнено, выход из цикла")
@@ -731,5 +903,27 @@ class FormFillerOrchestrator:
             self._log("   обновление DOM")
             await page.wait_for_timeout(3000)
 
-        self._log("[FormFiller] филлер закончил работу")
-        return submit_done
+        self._log("[FormFiller] филлер закончил работу без сабмита")
+
+        if not saw_form_fields:
+            return self._make_report(
+                FormFillStatus.FORM_NOT_FOUND,
+                "за все шаги не найдено ни одного поля ввода",
+                step,
+                fields_filled=fields_filled,
+            )
+
+        if step >= max_steps:
+            return self._make_report(
+                FormFillStatus.FILL_FAILED,
+                f"исчерпан лимит шагов ({max_steps}), сабмит не выполнен",
+                step,
+                fields_filled=fields_filled,
+            )
+
+        return self._make_report(
+            FormFillStatus.FILL_FAILED,
+            "агент остановился, не дойдя до сабмита",
+            step,
+            fields_filled=fields_filled,
+        )

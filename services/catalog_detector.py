@@ -10,6 +10,7 @@ from playwright.async_api import async_playwright, BrowserContext
 
 from services.page_analyzer import analyze_page, analyze_external_form
 from services.router_service import route_site
+from core.errors import SiteUnavailableError, DdosProtectionError
 
 MAX_CONCURRENT_TABS = 2
 MAX_PAGES_TO_VISIT = 20
@@ -72,23 +73,28 @@ _EMAIL_GENERIC_KEYWORDS = [
 
 def _score_email(email: str) -> int:
     e = email.lower()
+    # hr/generic ищем только в части до @, иначе "mail" матчится
+    # с доменами gmail.com / mail.ru и все почты получают 50 баллов
+    local = e.split("@")[0]
     if any(kw in e for kw in _EMAIL_JUNK_KEYWORDS):
         return -100
-    if any(kw in e for kw in _EMAIL_HR_KEYWORDS):
+    if any(kw in local for kw in _EMAIL_HR_KEYWORDS):
         return 100
-    if any(kw in e for kw in _EMAIL_GENERIC_KEYWORDS):
+    if any(kw in local for kw in _EMAIL_GENERIC_KEYWORDS):
         return 50
     return 0
 
 
-def choose_best_emails(emails: set) -> list[str]:
+def choose_best_emails(emails: set, min_score: int = 0) -> list[str]:
+    """min_score=0 — все не-мусорные; min_score=50 — только hr@/career@/info@/contact@
+    и подобные, случайные личные ящики из футеров отсекаются."""
     clean = [
         e
         for e in emails
         if not e.startswith("u00")
         and not any(e.lower().endswith(ext) for ext in BANNED_EXTENSIONS)
     ]
-    non_junk = [e for e in clean if _score_email(e) >= 0]
+    non_junk = [e for e in clean if _score_email(e) >= min_score]
     return sorted(non_junk, key=_score_email, reverse=True)
 
 
@@ -148,6 +154,9 @@ class SmartCrawler:
         self.cooldown_lock = asyncio.Lock()
         self.needs_restart = False
 
+        self.start_page_failed: str | None = None
+        self.gave_up_blocked = False
+
     def _log(self, message: str):
         """Внутренняя функция для принтов"""
         if self.verbose:
@@ -199,6 +208,12 @@ class SmartCrawler:
                     self._log(
                         f"   [Worker {worker_id}] GOTO ERROR #{page_id} | {url} | {type(nav_e).__name__}: {nav_e}"
                     )
+                    if page.url == "about:blank":
+                        if depth == 0:
+                            self.start_page_failed = (
+                                f"{type(nav_e).__name__}: {str(nav_e).splitlines()[0]}"
+                            )
+                        continue
 
                 await page.wait_for_timeout(2000)
 
@@ -216,7 +231,7 @@ class SmartCrawler:
                         await new Promise(r => setTimeout(r, 400));
                         window.scrollTo(0, document.body.scrollHeight);
                         await new Promise(r => setTimeout(r, 600));
-                        window.scrollTo(0, 0); 
+                        window.scrollTo(0, 0);
                     }
                 """)
                 await page.wait_for_timeout(1000)
@@ -244,20 +259,20 @@ class SmartCrawler:
                         links = await page.evaluate("""
                             () => {
                                 const ignoreSelector = [
-                                    'header', 'footer', 'nav', 
+                                    'header', 'footer', 'nav',
                                     '#t-header', '#t-footer',
                                     '[data-tilda-page-alias="header"]', '[data-tilda-page-alias="footer"]', '[data-tilda-page-alias="footer-html"]',
                                     '.uc-scrollmenu', '.t280', '.t794', '.t450', '.t461',
-                                    '[class*="header" i]', '[class*="footer" i]', '[class*="nav" i]', 
-                                    '[id*="header" i]', '[id*="footer" i]', 
+                                    '[class*="header" i]', '[class*="footer" i]', '[class*="nav" i]',
+                                    '[id*="header" i]', '[id*="footer" i]',
                                 ].join(', ');
-                                
+
                                 return Array.from(document.querySelectorAll("a[href]")).map(a => {
                                     const isNav = !!a.closest(ignoreSelector);
                                     // Учитываем, что ссылка должна быть видимой
                                     const isVisible = a.offsetWidth > 0 || a.offsetHeight > 0 || a.getClientRects().length > 0;
                                     return {
-                                        text: a.innerText.trim(), 
+                                        text: a.innerText.trim(),
                                         href: a.href,
                                         isNav: isNav,
                                         isVisible: isVisible
@@ -469,6 +484,7 @@ class SmartCrawler:
                 restarts += 1
                 if restarts > max_restarts:
                     self._log("Слишком много блокировок (3/3). Сдаемся.")
+                    self.gave_up_blocked = True
                     break
                 current_workers_count = 2
                 sleep_time = 15 * max(restarts, 2)
@@ -477,7 +493,21 @@ class SmartCrawler:
                 )
                 await asyncio.sleep(sleep_time)
             else:
-                break  # Если блока не было (очередь пуста или лимит) — всё ок, выходим
+                break
+
+        has_useful = any(f["score"] >= 50 for f in self.findings) or bool(self.emails)
+
+        if not has_useful:
+            if self.gave_up_blocked:
+                raise DdosProtectionError(
+                    f"Анти-бот блокировка не снялась после {max_restarts} перезапусков",
+                    url=self.start_url,
+                )
+            if self.start_page_failed:
+                raise SiteUnavailableError(
+                    f"Стартовая страница не загрузилась: {self.start_page_failed}",
+                    url=self.start_url,
+                )
 
         if use_llm:
             return await self.analyze_findings_llm()

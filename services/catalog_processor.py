@@ -53,16 +53,13 @@ class CatalogProcessor:
                     let href = a.getAttribute('href');
                     if (!href) return;
                     
-                    // Превращаем любую ссылку (даже /vacancies/123) в абсолютную
                     let fullUrl = '';
                     try { 
                         fullUrl = new URL(href, window.location.href).href.split('#')[0]; 
                     } catch(e) { return; }
 
-                    // Игнорируем звонки, почту и JS-скрипты
                     if (fullUrl.startsWith('javascript') || fullUrl.startsWith('mailto') || fullUrl.startsWith('tel')) return;
 
-                    // Оставляем ТОЛЬКО ссылки, которые ведут на этот же домен (отсекаем соцсети)
                     try {
                         if (!new URL(fullUrl).hostname.includes(currentDomain)) return;
                     } catch(e) { return; }
@@ -236,8 +233,7 @@ class CatalogProcessor:
 
     async def process_catalog(
         self, page: Page, catalog_url: str, target_job: str, queries: list[str] = None
-    ) -> str | None:
-        """основная функция"""
+    ) -> dict:
         self._log(
             f"\n{'='*50}\n[ЭТАП: ОБРАБОТКА КАТАЛОГА]\nURL: {catalog_url}\n{'='*50}"
         )
@@ -322,7 +318,13 @@ class CatalogProcessor:
 
         if not all_collected_links:
             self._log("[CatalogProcessor] ссылок не найдено.")
-            return None
+            return {
+                "url": None,
+                "title": "",
+                "reason": "на странице каталога не собрано ни одной ссылки "
+                "(не отрендерилось / карточки не-анкорные)",
+                "fail_kind": "scrape_empty",
+            }
 
         final_links_list = [
             {"title": title, "url": url} for url, title in all_collected_links.items()
@@ -362,11 +364,26 @@ class CatalogProcessor:
                     f"[CatalogProcessor] LLM выбрала:\n   [{title}]\n   {selected_url}"
                 )
                 self._log(f"   Причина: {reason}")
-                return selected_url
-            else:
-                self._log(f"[CatalogProcessor] LLM ответила null. причина: {reason}")
+                return {
+                    "url": selected_url,
+                    "title": title,
+                    "reason": reason,
+                    "fail_kind": None,
+                }
+
+            self._log(f"[CatalogProcessor] LLM ответила null. причина: {reason}")
+            return {
+                "url": None,
+                "title": "",
+                "reason": reason or "релевантной вакансии в каталоге не найдено",
+                "fail_kind": "no_match",
+            }
 
         except Exception as e:
             self._log(f"[CatalogProcessor] ошибка LLM: {e}")
-
-        return None
+            return {
+                "url": None,
+                "title": "",
+                "reason": f"ошибка LLM-селектора: {e}",
+                "fail_kind": "error",
+            }
