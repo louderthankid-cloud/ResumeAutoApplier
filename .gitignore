@@ -2,6 +2,7 @@
 .env
 .env.local
 .env.*.local
+.hh_token.json
 
 # dependencies
 node_modules/

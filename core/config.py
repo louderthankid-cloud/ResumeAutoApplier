@@ -10,9 +10,14 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
 
+    # HH_ACCESS_TOKEN — стартовый токен из .env, потом берётся из временного
+    HH_CLIENT_ID: str | None = None
+    HH_CLIENT_SECRET: str | None = None
+    HH_ACCESS_TOKEN: str | None = None
+
     LLM_TIMEOUT: int = 600
 
-    DRY_RUN: bool = True  # тест ран (дефолт; бот выбирает режим на запуск)
+    DRY_RUN: bool = True  # тест ран
     LLM_CALL_LOG: bool = True
 
     PIPELINE_POOL_SIZE: int = 6  # общий пул параллельных компаний на все прогоны

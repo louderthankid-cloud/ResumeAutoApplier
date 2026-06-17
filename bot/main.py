@@ -35,6 +35,7 @@ async def main() -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="menu", description="Главное меню"),
+            BotCommand(command="check", description="Проверка конфигурации"),
             BotCommand(command="cancel", description="Отменить текущее действие"),
             BotCommand(command="start", description="Старт"),
         ]

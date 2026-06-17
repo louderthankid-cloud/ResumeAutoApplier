@@ -17,8 +17,9 @@ from bot import keyboards as kb
 from bot import panel
 from bot.callbacks import MenuCB, CandCB
 from bot.states import CreateCandidate, EditCandidate
-from bot.formatters import candidate_card, validation_note, esc
+from bot.formatters import candidate_card, validation_note, format_health, esc
 from bot.utils import owned_candidate, safe_delete
+from services.health import check_config
 
 router = Router()
 
@@ -96,6 +97,31 @@ async def cb_cancel(cb: CallbackQuery, state: FSMContext):
     text, markup = await _home_view(cb.from_user.id)
     await panel.render(cb.bot, cb.message.chat.id, text, markup)
     await cb.answer("Отменено")
+
+
+# проверка конфига
+
+
+async def _render_check(bot, chat_id: int, force_new: bool = False):
+    results = await check_config()
+    await panel.render(
+        bot, chat_id, format_health(results), kb.check_kb(), force_new=force_new
+    )
+
+
+@router.message(Command("check"))
+async def cmd_check(message: Message, state: FSMContext):
+    await state.clear()
+    await safe_delete(message.bot, message.chat.id, message.message_id)
+    await _render_check(message.bot, message.chat.id, force_new=True)
+
+
+@router.callback_query(MenuCB.filter(F.a == "check"))
+async def cb_check(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    panel.set_panel(cb.message.chat.id, cb.message.message_id)
+    await cb.answer("Проверяю…")
+    await _render_check(cb.bot, cb.message.chat.id)
 
 
 # home

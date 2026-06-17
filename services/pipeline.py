@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from services.catalog_detector import SmartCrawler, choose_best_emails
 from services.catalog_processor import CatalogProcessor
 from services.hh_query_service import generate_hh_queries
+from services import hh_auth
 from services.form_filler_service import FormFillerOrchestrator
 from services.email_service import send_email
 from services.cover_letter_service import generate_cover_letter
@@ -28,7 +29,6 @@ from schemas.application import (
 )
 
 HH_API_BASE = "https://api.hh.ru"
-HH_TOKEN = os.getenv("HH_ACCESS_TOKEN")
 
 OK_STATUSES = (ApplicationStatus.SUCCESS, ApplicationStatus.DRY_RUN_OK)
 
@@ -85,84 +85,117 @@ def _hh_snippet(item: dict) -> str | None:
     return text.strip() or None
 
 
-async def load_from_hh(
-    queries: list[str] | str, limit: int, log: Callable[..., None] = print
-) -> list["CompanyLead"]:
-    """собирает компании с хх по нескольким вариантам названия должности"""
-    if isinstance(queries, str):
-        queries = [queries]
-    if not HH_TOKEN or limit <= 0 or not queries:
-        return []
-
+async def _hh_get(session, url: str, token_box: dict, params: dict | None = None):
+    """GET к hh с Bearer, при истечении токена - запись нового"""
     headers = {
-        "Authorization": f"Bearer {HH_TOKEN}",
+        "Authorization": f"Bearer {token_box['t']}",
         "User-Agent": "ResumeAutoApplier/1.0",
     }
-    result = []
-    seen_employers = set()
+    async with session.get(url, headers=headers, params=params) as r:
+        if r.status not in (401, 403):
+            return r.status, (await r.json() if r.status == 200 else None)
+    # если токен протух — обновляем
+    token_box["t"] = await hh_auth.get_access_token(stale_token=token_box["t"])
+    headers["Authorization"] = f"Bearer {token_box['t']}"
+    async with session.get(url, headers=headers, params=params) as r2:
+        return r2.status, (await r2.json() if r2.status == 200 else None)
+
+
+async def load_from_hh(
+    queries: list[str] | str,
+    limit: int,
+    blocked: set[str] | None = None,
+    log: Callable[..., None] = print,
+) -> list["CompanyLead"]:
+    """Собирает с hh компаниии"""
+    if isinstance(queries, str):
+        queries = [queries]
+    if limit <= 0 or not queries:
+        return []
+    blocked = blocked or set()
+
+    token = await hh_auth.get_access_token()
+    if not token:
+        log("   [HH] нет токена (HH_ACCESS_TOKEN / HH_CLIENT_ID+SECRET) — HH пропущен")
+        return []
+    token_box = {"t": token}
+
+    result: list[CompanyLead] = []
+    seen_employers: set = set()
+    PER_PAGE = 100
+    MAX_PAGE = 2000 // PER_PAGE  # лимит hh: page*per_page <= 2000
 
     async with aiohttp.ClientSession() as session:
         for query in queries:
             if len(result) >= limit:
                 break
-            log(f"   [HH] запрос: '{query}'  (собрано {len(result)}/{limit})")
+            log(f"   [HH] запрос: '{query}'  (свежих {len(result)}/{limit})")
             page = 0
-            while len(result) < limit and page < 10:
+            while len(result) < limit and page < MAX_PAGE:
                 params = {
                     "text": query,
                     "search_field": "name",
-                    "per_page": 20,
+                    "per_page": PER_PAGE,
                     "page": page,
                     "area": 113,
                     "order_by": "publication_time",
                 }
-                async with session.get(
-                    f"{HH_API_BASE}/vacancies", headers=headers, params=params
-                ) as r:
-                    if r.status != 200:
-                        break
-                    data = await r.json()
-
+                status, data = await _hh_get(
+                    session, f"{HH_API_BASE}/vacancies", token_box, params
+                )
+                if status != 200 or not data:
+                    break
                 items = data.get("items", [])
                 if not items:
-                    break  # этот запрос исчерпан — переходим к следующему варианту
+                    break  # запрос исчерпан — к следующему варианту
 
                 for item in items:
                     if len(result) >= limit:
                         break
-                    emp_id = item.get("employer", {}).get("id")
+                    emp = item.get("employer") or {}
+                    emp_id = emp.get("id")
                     if not emp_id or emp_id in seen_employers:
                         continue
                     seen_employers.add(emp_id)
 
+                    # уже обработанных пропускаем по имени из вакансии — без GET деталей
+                    emp_name = emp.get("name") or ""
+                    if emp_name and DBService._clean_company_name(emp_name) in blocked:
+                        continue
+
                     await asyncio.sleep(0.2)
-                    async with session.get(
-                        f"{HH_API_BASE}/employers/{emp_id}", headers=headers
-                    ) as er:
-                        if er.status != 200:
-                            continue
-                        emp = await er.json()
-                        if emp.get("type") == "agency":
-                            log(f"   [HH] скип (кадровое агентство): {emp.get('name')}")
-                            continue
-                        site = emp.get("site_url", "").rstrip("/")
-                        if site:
-                            result.append(
-                                CompanyLead(
-                                    company_name=emp.get("name", "Unknown"),
-                                    site_url=site,
-                                    hh_url=item.get("alternate_url", ""),
-                                    vacancy_title=item.get("name"),
-                                    vacancy_snippet=_hh_snippet(item),
-                                )
-                            )
-                            log(f"   [HH] +{emp.get('name')} → {site}")
-                            log(
-                                f"        вакансия: {item.get('name')} | {item.get('alternate_url', '')}"
-                            )
+                    estatus, edata = await _hh_get(
+                        session, f"{HH_API_BASE}/employers/{emp_id}", token_box
+                    )
+                    if estatus != 200 or not edata:
+                        continue
+                    if edata.get("type") == "agency":
+                        log(f"   [HH] скип (кадровое агентство): {edata.get('name')}")
+                        continue
+                    site = (edata.get("site_url") or "").rstrip("/")
+                    if not site:
+                        continue
+                    # подстраховка: точное имя из деталей тоже сверяем с blocked
+                    if (
+                        DBService._clean_company_name(edata.get("name") or "")
+                        in blocked
+                    ):
+                        continue
+
+                    result.append(
+                        CompanyLead(
+                            company_name=edata.get("name", "Unknown"),
+                            site_url=site,
+                            hh_url=item.get("alternate_url", ""),
+                            vacancy_title=item.get("name"),
+                            vacancy_snippet=_hh_snippet(item),
+                        )
+                    )
+                    log(f"   [HH] +{edata.get('name')} → {site}")
 
                 page += 1
 
+    log(f"   [HH] набрано {len(result)}/{limit} свежих")
     return result
 
 
@@ -520,18 +553,16 @@ async def run_candidate_pipeline(
         def acquire_slot():
             return _sem
 
+    blocked = await DBService.get_blocked_companies(candidate.id)
+
     leads: list[CompanyLead] = [
         CompanyLead(company_name=n, site_url=u) for n, u in (extra_sites or [])
     ]
     if hh_limit > 0:
         hh_queries = await generate_hh_queries(candidate.target_job, verbose=verbose)
-        log(
-            f"Загружаю до {hh_limit} компаний с HH по {len(hh_queries)} вариантам запроса..."
-        )
-        leads.extend(await load_from_hh(hh_queries, hh_limit, log))
+        log(f"Ищу {hh_limit} свежих компаний на HH по {len(hh_queries)} вариантам...")
+        leads.extend(await load_from_hh(hh_queries, hh_limit, blocked, log))
 
-    # фильтр компаний
-    blocked = await DBService.get_blocked_companies(candidate.id)
     fresh = []
     for lead in leads:
         if DBService._clean_company_name(lead.company_name) in blocked:

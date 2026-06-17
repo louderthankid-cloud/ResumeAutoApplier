@@ -125,6 +125,14 @@ def outcome_summary(stats: dict) -> str:
     return "\n".join(lines)
 
 
+def format_health(results) -> str:
+    lines = ["<b>Проверка конфигурации</b>", DIV]
+    for name, ok, detail in results:
+        mark = "ок" if ok else "НЕТ"
+        lines.append(f"{name}: <b>{mark}</b> — {esc(detail)}")
+    return "\n".join(lines)
+
+
 def application_line(a) -> str:
     """итог + оба канала + ссылка"""
     lines = [f"<b>{esc(a.company_name)}</b> — {app_outcome(a)}"]

@@ -16,6 +16,16 @@ def home_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_btn("Добавить кандидата", MenuCB(a="add").pack())],
             [_btn("Список кандидатов", MenuCB(a="page", page=0).pack())],
+            [_btn("Проверка конфига", MenuCB(a="check").pack())],
+        ]
+    )
+
+
+def check_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [_btn("Обновить", MenuCB(a="check").pack())],
+            [_btn("На главную", MenuCB(a="home").pack())],
         ]
     )
 
