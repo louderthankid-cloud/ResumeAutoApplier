@@ -22,22 +22,20 @@ def send_email(
     subject: str,
     body: str,
     resume_path: str | None = None,
+    dry_run: bool | None = None,
 ) -> bool:
-    """
-    Отправляет письмо через SMTP. Опционально прикрепляет резюме.
-    Возвращает True если успешно, False если ошибка.
-
-    В режиме DRY_RUN письмо реально отправляется, но НЕ адресату, а себе —
-    на EMAIL_ADDRESS из .env. В тему добавляется пометка с исходным получателем.
-    """
+    """отправляет письмо через smtp. опционально прикрепляет резюме"""
     if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD:
         print(
             "[EmailService] Ошибка: EMAIL_ADDRESS или EMAIL_APP_PASSWORD не заданы в .env"
         )
         return False
 
-    # ── DRY_RUN: перенаправляем письмо себе ──────────────────────────
-    if settings.DRY_RUN:
+    if dry_run is None:
+        dry_run = settings.DRY_RUN
+
+    # если тру, то письмо шлём себе же для теста
+    if dry_run:
         real_recipient = to
         to = EMAIL_ADDRESS
         subject = f"[DRY_RUN → {real_recipient}] {subject}"
@@ -58,7 +56,7 @@ def send_email(
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    # Прикрепляем резюме если есть
+    # прикрепляем резюме если есть
     if resume_path and os.path.exists(resume_path):
         with open(resume_path, "rb") as f:
             part = MIMEBase("application", "octet-stream")

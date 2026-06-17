@@ -12,8 +12,11 @@ class Settings(BaseSettings):
 
     LLM_TIMEOUT: int = 600
 
-    DRY_RUN: bool = True  # тест ран
+    DRY_RUN: bool = True  # тест ран (дефолт; бот выбирает режим на запуск)
     LLM_CALL_LOG: bool = True
+
+    PIPELINE_POOL_SIZE: int = 6  # общий пул параллельных компаний на все прогоны
+    TELEGRAM_BOT_TOKEN: str | None = None
 
     class Config:
         env_file = ".env"

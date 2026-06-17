@@ -19,24 +19,34 @@ class CatalogProcessor:
             return "{}"
         return text.replace("```json", "").replace("```", "").strip()
 
-    async def generate_search_queries(self, target_job: str) -> list[str]:
-        """генератор запросов в поисковик каталога"""
-        self._log(f"[CatalogProcessor] Генерирую запросы для '{target_job}'...")
+    async def generate_search_queries(
+        self,
+        target_job: str,
+        vacancy_title: str | None = None,
+        vacancy_snippet: str | None = None,
+    ) -> list[str]:
+        """запросы для строки поиска на сайте компании"""
+        label = vacancy_title or target_job
+        self._log(f"[CatalogProcessor] Генерирую запросы каталога для '{label}'...")
         try:
             response = await submit_prompt(
                 template_name="catalog_query_generator",
-                context_vars={"target_job": target_job},
+                context_vars={
+                    "target_job": target_job,
+                    "vacancy_title": vacancy_title,
+                    "vacancy_snippet": vacancy_snippet,
+                },
                 task_name="gen_query",
                 json_mode=True,
             )
             clean_text = self._clean_json(response)
             data = json.loads(clean_text)
-            queries = data.get("queries", [target_job])
+            queries = data.get("queries", [label])
             self._log(f"[CatalogProcessor] LLM придумала запросы: {queries}")
             return queries
         except Exception as e:
             self._log(f"[CatalogProcessor] ошибка генерации запросов: {e}")
-            return [target_job]
+            return [label]
 
     async def scrape_vacancy_links(self, page: Page) -> dict:
         """скролл и сбор ссылок в каталоге"""

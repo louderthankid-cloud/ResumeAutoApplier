@@ -1,4 +1,4 @@
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 import re
 
 from db.connection import AsyncSessionLocal
@@ -8,6 +8,8 @@ from schemas.application import (
     RETRYABLE_STATUSES,
     MAX_ATTEMPTS,
 )
+from services.resume_parser import extract_resume_text, extract_contacts
+from services.candidate_validator import validate_candidate, CandidateCheck
 
 
 class DBService:
@@ -31,12 +33,46 @@ class DBService:
         создает новую карточку кандидата и привязывает её к HR
         ожидает в data как минимум target_job и resume_text
         """
+        if not (data.get("resume_text") or "").strip():
+            raise ValueError("create_candidate: обязателен непустой resume_text")
+
         async with AsyncSessionLocal() as session:
             candidate = Candidate(tg_id=tg_id, **data)
             session.add(candidate)
             await session.commit()
             await session.refresh(candidate)
             return candidate
+
+    @staticmethod
+    async def create_candidate_from_file(
+        tg_id: str,
+        file_bytes: bytes,
+        filename: str,
+        target_job: str,
+        name: str | None = None,
+        mime: str | None = None,
+    ) -> tuple[Candidate, CandidateCheck]:
+        """
+        полный путь создания кандидата из присланного файла резюме — это зовёт бот.
+        name задаёт HR (для различения кандидатов); email/phone тянем regex из текста.
+        """
+        resume_text = extract_resume_text(file_bytes, filename)  # мб ResumeParseError
+        contacts = extract_contacts(resume_text)
+
+        data = {
+            "target_job": target_job,
+            "resume_text": resume_text,
+            "resume_blob": file_bytes,
+            "resume_filename": filename,
+            "resume_mime": mime,
+            "name": name,
+            "email": contacts["email"],
+            "phone": contacts["phone"],
+        }
+
+        candidate = await DBService.create_candidate(tg_id, data)
+        check = validate_candidate(candidate)
+        return candidate, check
 
     @staticmethod
     async def update_candidate(candidate_id: str, data: dict) -> Candidate | None:
@@ -70,6 +106,20 @@ class DBService:
         """получает карточку конкретного кандидата"""
         async with AsyncSessionLocal() as session:
             return await session.get(Candidate, candidate_id)
+
+    @staticmethod
+    async def delete_candidate(candidate_id: str) -> bool:
+        """удаляет кандидата и все его заявки. True — если кандидат был и удалён"""
+        async with AsyncSessionLocal() as session:
+            candidate = await session.get(Candidate, candidate_id)
+            if not candidate:
+                return False
+            await session.execute(
+                delete(Application).where(Application.candidate_id == candidate_id)
+            )
+            await session.delete(candidate)
+            await session.commit()
+            return True
 
     @staticmethod
     async def record_application(
@@ -197,13 +247,50 @@ class DBService:
         return {status: count for status, count in rows}
 
     @staticmethod
+    async def get_outcome_stats(candidate_id: str) -> dict:
+        """сводка по итогу для отображения"""
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(
+                    select(Application.channel, Application.status, func.count())
+                    .where(Application.candidate_id == candidate_id)
+                    .group_by(Application.channel, Application.status)
+                )
+            ).all()
+
+        total = 0
+        responded = 0
+        channels: dict[str, int] = {"email": 0, "form": 0, "both": 0}
+        failed: dict[str, int] = {}
+        for channel, status, cnt in rows:
+            total += cnt
+            if channel:  # дозвонились хотя бы одним каналом
+                responded += cnt
+                channels[channel] = channels.get(channel, 0) + cnt
+            else:
+                failed[status] = failed.get(status, 0) + cnt
+
+        return {
+            "total": total,
+            "responded": responded,
+            "channels": channels,
+            "failed": failed,
+        }
+
+    @staticmethod
     async def get_applications(
-        candidate_id: str, status: ApplicationStatus | None = None
+        candidate_id: str,
+        status: ApplicationStatus | None = None,
+        responded: bool | None = None,
     ) -> list[Application]:
         """список заявок кандидата"""
         async with AsyncSessionLocal() as session:
             stmt = select(Application).where(Application.candidate_id == candidate_id)
             if status:
                 stmt = stmt.where(Application.status == status.value)
+            if responded is True:
+                stmt = stmt.where(Application.channel.isnot(None))
+            elif responded is False:
+                stmt = stmt.where(Application.channel.is_(None))
             stmt = stmt.order_by(Application.updated_at.desc())
             return list((await session.execute(stmt)).scalars().all())

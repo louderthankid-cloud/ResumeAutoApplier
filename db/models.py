@@ -5,6 +5,7 @@ from sqlalchemy import (
     Text,
     DateTime,
     Integer,
+    LargeBinary,
     ForeignKey,
     UniqueConstraint,
     Index,
@@ -24,7 +25,15 @@ class Candidate(Base):
 
     target_job = Column(String, nullable=False)
     resume_text = Column(Text, nullable=False)  # извлечённый текст из pdf/docx
-    resume_path = Column(String)  # сам файл — для аттача к письму/форме
+
+    # файл резюме, хранится в бд
+    # перед прогоном материализуется во временный файл
+    resume_blob = Column(LargeBinary)  # содержимое файла
+    resume_filename = Column(String)  # оригинальное имя (для аттача к письму)
+    resume_mime = Column(String)
+
+    # временный путь к материализованному файлу на время прогона (не хранилище)
+    resume_path = Column(String)
 
     # опционально: ллм берёт всё из resume_text, эти поля нужныв для отображения в меню
     name = Column(String)

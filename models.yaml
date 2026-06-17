@@ -65,6 +65,11 @@ tasks:
     model: "gemini-3.1-flash-lite-preview" 
     temperature: 0.0
 
+  hh_query:
+    provider: "gigachat"       
+    model: "GigaChat:latest" 
+    temperature: 0.0
+
   vacancy_selector:
     provider: "google" # "OpenRouter"
     model: "gemini-3.1-flash-lite-preview" # "baidu/cobuddy:free" # deepseek/deepseek-v4-flash:free

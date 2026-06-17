@@ -13,7 +13,7 @@ from services.router_service import route_site
 from core.errors import SiteUnavailableError, DdosProtectionError
 
 MAX_CONCURRENT_TABS = 2
-MAX_PAGES_TO_VISIT = 20
+MAX_PAGES_TO_VISIT = 30
 BANNED_EXTENSIONS = (
     ".pdf",
     ".doc",
@@ -640,18 +640,13 @@ class SmartCrawler:
                 continue
 
             url_norm = normalize_url(f["url"])
-            parents_for_form = set()
-            for finding in self.findings:
-                if normalize_url(finding["url"]) == url_norm:
-                    parents_for_form.add(
-                        finding["parent"] if finding["parent"] else self.start_url
-                    )
-
-            valid_parents = [
-                p
-                for p in parents_for_form
-                if normalize_url(p) != url_norm and normalize_url(p) != root_domain
-            ]
+            valid_parents = sorted(
+                {
+                    normalize_url(p)
+                    for p in self.parents_map.get(f["url"], set())
+                    if normalize_url(p) != url_norm and normalize_url(p) != root_domain
+                }
+            )
 
             forms_for_llm.append(
                 {

@@ -1,24 +1,26 @@
+# secrets / env
 .env
 .env.local
 .env.*.local
 
+# dependencies
 node_modules/
 vendor/
 
+# logs
 logs/
 *.log
 
-.vscode/
-
+# databases (SQLite files, checkpoints)
 *.sqlite
 *.sqlite3
-checkpoints.sqlite
-db/*.sqlite
 
+# pipeline run artifacts
 *.csv
 *.jsonl
 results/
 
+# python
 __pycache__/
 *.pyc
 *.py[cod]
@@ -26,13 +28,14 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# editors
+.vscode/
+.idea/
+
+# temp
 *.tmp
 *.temp
 
-combined.txt
-
-*.pdf
-*.txt
-*.md
-
+# local dev scratch: notes, exports, dummy data — NOT for version control
+scratch/
 test_scripts/
