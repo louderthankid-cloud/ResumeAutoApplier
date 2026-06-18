@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     DRY_RUN: bool = True  # тест ран
     LLM_CALL_LOG: bool = True
 
-    PIPELINE_POOL_SIZE: int = 6  # общий пул параллельных компаний на все прогоны
+    PIPELINE_POOL_SIZE: int = 3  # параллельных компаний ВНУТРИ одного прогона (per-run)
+    MAX_CONCURRENT_RUNS: int = 3  # потолок одновременных прогонов (процессов) всего
     TELEGRAM_BOT_TOKEN: str | None = None
 
     class Config:

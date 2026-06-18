@@ -17,6 +17,7 @@ from aiogram.types import BotCommand
 
 from core.config import settings
 from bot.handlers import candidates, run, results
+from bot.runs import run_manager
 
 
 async def main() -> None:
@@ -42,7 +43,10 @@ async def main() -> None:
     )
     await bot.delete_webhook(drop_pending_updates=True)
     print(f"[bot] запущен, пул параллелизма = {settings.PIPELINE_POOL_SIZE}")
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        run_manager.shutdown_all()
 
 
 if __name__ == "__main__":
