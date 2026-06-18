@@ -74,20 +74,28 @@ class CatalogProcessor:
                         if (!new URL(fullUrl).hostname.includes(currentDomain)) return;
                     } catch(e) { return; }
 
-                    // Вытаскиваем текст. Если <a> пустое (например, ссылка натянута поверх карточки), 
-                    // идём вверх по дереву и собираем текст родительских блоков
                     let text = (a.innerText || "").trim();
+                    let aria = (a.getAttribute('aria-label') || "").trim();
+                    let title = (a.getAttribute('title') || "").trim();
+                    let name = (a.getAttribute('name') || "").trim();
+                    
+                    if (text.length < 5) {
+                        text = [text, aria, title, name].filter(Boolean).join(' | ');
+                    }
+                    
                     if (text.length < 20 && a.parentElement) {
                         let parent = a.parentElement;
-                        for (let d = 0; d < 4 && parent; d++) {
+                        for (let d = 0; d < 3 && parent; d++) {
                             let pText = (parent.innerText || "").trim();
-                            if (pText.length > text.length) text = pText;
+                            if (pText.length > text.length && pText.length < 200) {
+                                text = pText;
+                            }
                             parent = parent.parentElement;
+
                         }
                     }
                     
-                    if (!text) text = (a.getAttribute('aria-label') || "").trim();
-                    text = text.replace(/\\s+/g, ' ').substring(0, 500); // Ограничиваем длину 500 симв.
+                    text = text.replace(/\\s+/g, ' ').substring(0, 200); 
                     
                     // Сохраняем в мапу. Если ссылка уже есть, оставляем тот вариант, где текста больше
                     if (text.length > 5) {
@@ -104,7 +112,14 @@ class CatalogProcessor:
                 for (let btn of buttons) {
                     const text = (btn.textContent || "").toLowerCase();
                     if (btn.offsetWidth > 0 && btn.offsetHeight > 0 && keywords.some(k => text.includes(k))) {
+                        if (btn.tagName.toLowerCase() === 'a') {
+                            const href = btn.getAttribute('href');
+                            if (href && href !== '#' && !href.startsWith('javascript')) {
+                                continue;
+                            }
+                        }
                         try { btn.click(); return true; } catch(e) {}
+
                     }
                 }
                 return false;
@@ -112,13 +127,19 @@ class CatalogProcessor:
             
             collectLinks(); 
             for (let i = 0; i < maxScrolls; i++) {
+                if (!document || !document.body) break;
                 let prevHeight = document.body.scrollHeight;
                 let clicked = clickShowMore();
+                
+                if (!document || !document.body) break;
                 window.scrollTo(0, document.body.scrollHeight);
                 await new Promise(r => setTimeout(r, 1200)); 
                 collectLinks();
+                
+                if (!document || !document.body) break;
                 if (!clicked && document.body.scrollHeight === prevHeight) {
                     await new Promise(r => setTimeout(r, 1000));
+                    if (!document || !document.body) break;
                     if (document.body.scrollHeight === prevHeight) break; 
                 }
             }

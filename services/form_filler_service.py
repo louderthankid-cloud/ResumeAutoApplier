@@ -77,15 +77,28 @@ class FormFillerOrchestrator:
             };
 
             const getContext = (el) => {
-                let label = el.getAttribute('aria-label') || el.placeholder || '';
-                if (el.labels && el.labels.length > 0) {
-                    label += ' ' + Array.from(el.labels).map(l => l.innerText).join(' ');
+                let parts = [];
+                if (el.name) parts.push(el.name);
+                if (el.getAttribute('aria-label')) parts.push(el.getAttribute('aria-label'));
+                if (el.placeholder) parts.push(el.placeholder);
+                // aria-labelledby → текст связанных элементов (плавающие лейблы uikit:
+                const lb = el.getAttribute('aria-labelledby');
+                if (lb) {
+                    lb.split(/\s+/).forEach(id => {
+                        const lab = document.getElementById(id);
+                        if (lab && lab.innerText) parts.push(lab.innerText.trim());
+                    });
                 }
+                // нативные <label for=...> / обёртки
+                if (el.labels && el.labels.length > 0) {
+                    parts.push(Array.from(el.labels).map(l => l.innerText).join(' '));
+                }
+                // контекст родителя — как запасной вариант
                 let parent = el.parentElement;
                 if (parent) {
-                    label += ' | Контекст: ' + (parent.innerText || '').substring(0, 80);
+                    parts.push('Контекст: ' + (parent.innerText || '').substring(0, 80));
                 }
-                return label.replace(/\s+/g, ' ').trim().substring(0, 150);
+                return parts.join(' | ').replace(/\s+/g, ' ').trim().substring(0, 180);
             };
 
             // 1. Поля ввода
@@ -219,15 +232,21 @@ class FormFillerOrchestrator:
                     (el.id || '')
                 ).toLowerCase();
                 const provider = /smartcaptcha|smart-captcha|checkboxcaptcha|recaptcha|hcaptcha|turnstile|yandexcloud|grecaptcha/.test(sig);
+                const dataSize = (el.getAttribute('data-size') || '').toLowerCase();
+                const isBadge = sig.includes('badge');
+                const rect = el.getBoundingClientRect();
+                const interactive = !isBadge && dataSize !== 'invisible'
+                    && rect.width >= 120 && rect.height >= 40;
                 elements.push({
                     id: getBotId(el),
                     tag: el.tagName.toLowerCase(),
                     type: 'captcha',
                     context: 'ВИДЖЕТ КАПТЧИ'
                         + (inForm ? ' (внутри формы отклика!)' : '')
-                        + (provider ? ' [известный провайдер — пройти автоматически нельзя]' : ''),
+                        + (interactive ? ' [интерактивный — блокирует]' : ' [фоновая/невидимая]'),
                     in_form: inForm,
-                    provider: provider
+                    provider: provider,
+                    interactive: interactive
                 });
             });
 
@@ -390,9 +409,7 @@ class FormFillerOrchestrator:
             )
 
         captcha_block = [
-            e
-            for e in elements
-            if e.get("type") == "captcha" and (e.get("provider") or e.get("in_form"))
+            e for e in elements if e.get("type") == "captcha" and e.get("interactive")
         ]
         if captcha_block:
             return (
@@ -440,6 +457,55 @@ class FormFillerOrchestrator:
         self._log(f"[FormFiller] итог: {report.status.value} — {report.detail}")
         return report
 
+    async def _pick_autocomplete(self, page, locator, val: str) -> bool:
+        await page.wait_for_timeout(800)
+        vallow = (val or "").strip().lower()
+
+        controls_id = await locator.get_attribute("aria-controls")
+        if controls_id:
+            selectors = [f'#{controls_id} [role="option"]', f"#{controls_id} li"]
+        else:
+            selectors = [
+                '[role="listbox"] [role="option"]',
+                '[role="option"]',
+                '[class*="suggest" i] li',
+                '[class*="dropdown" i] [role="option"]',
+            ]
+
+        for sel in selectors:
+            opts = page.locator(sel)
+            try:
+                n = await opts.count()
+            except Exception:
+                continue
+            if not n:
+                continue
+            first_visible = None
+            for i in range(min(n, 15)):
+                o = opts.nth(i)
+                try:
+                    if not await o.is_visible():
+                        continue
+                    text = ((await o.inner_text()) or "").strip().lower()
+                except Exception:
+                    continue
+                if first_visible is None:
+                    first_visible = o
+                if vallow and vallow in text:
+                    try:
+                        await o.click(timeout=1500)
+                        return True
+                    except Exception:
+                        pass
+            if first_visible is not None:
+                try:
+                    await first_visible.click(timeout=1500)
+                    return True
+                except Exception:
+                    pass
+
+        return False
+
     async def run_loop(
         self, page: Page, candidate_resume: str, resume_path: str, max_steps: int = 4
     ) -> FormFillReport:
@@ -471,11 +537,10 @@ class FormFillerOrchestrator:
                 saw_form_fields = True
 
             captcha_block = any(
-                e.get("type") == "captcha" and (e.get("provider") or e.get("in_form"))
-                for e in elements
+                e.get("type") == "captcha" and e.get("interactive") for e in elements
             )
             if captcha_block:
-                self._log("   [КАПТЧА] обнаружен блокирующий виджет — стоп")
+                self._log("   [КАПТЧА] интерактивный челлендж в форме — стоп")
                 return self._make_report(
                     FormFillStatus.BLOCKED_CAPTCHA,
                     "на странице каптча, блокирующая отправку (пройти автоматически нельзя)",
@@ -718,6 +783,23 @@ class FormFillerOrchestrator:
                                 await locator.fill("")
                                 await locator.press_sequentially(clean_val, delay=60)
 
+                                is_combo = await locator.evaluate(
+                                    "(el) => el.getAttribute('role')==='combobox'"
+                                    " || ['list','both'].includes(el.getAttribute('aria-autocomplete')||'none')"
+                                )
+                                if is_combo:
+                                    picked = await self._pick_autocomplete(
+                                        page, locator, clean_val
+                                    )
+                                    self._log(
+                                        f"   autocomplete [{bot_id}]: "
+                                        + (
+                                            "выбран пункт"
+                                            if picked
+                                            else "выпадашка не найдена"
+                                        )
+                                    )
+
                         except Exception:
                             await locator.evaluate(
                                 "(el, v) => { el.value = ''; el.dispatchEvent(new Event('input', {bubbles: true})); el.value = v; el.dispatchEvent(new Event('input', {bubbles: true})); el.dispatchEvent(new Event('change', {bubbles: true})); }",
@@ -819,29 +901,33 @@ class FormFillerOrchestrator:
                     elif action_type == "upload_file":
                         self._log(f"   Загрузка файла в [{bot_id}]")
                         tag_name = await locator.evaluate(
-                            "el => el.tagName.toLowerCase()"
+                            "el => el.tagName.toLowerCase()", timeout=3000
                         )
-                        el_type = await locator.evaluate("el => el.type")
+                        el_type = await locator.evaluate("el => el.type", timeout=3000)
 
                         if tag_name == "input" and el_type == "file":
-                            await locator.set_input_files(resume_path)
+                            await locator.set_input_files(resume_path, timeout=5000)
                         else:
                             async with page.expect_file_chooser(
-                                timeout=2000
+                                timeout=3000
                             ) as fc_info:
                                 try:
                                     await locator.click(force=True, timeout=2000)
                                 except:
-                                    await locator.evaluate("el => el.click()")
+                                    await locator.evaluate(
+                                        "el => el.click()", timeout=2000
+                                    )
                             file_chooser = await fc_info.value
                             await file_chooser.set_files(resume_path)
                         actions_executed += 1
-                        fields_filled += (
-                            1  # загрузили резюме — реальное действие по форме
-                        )
-                        await locator.evaluate(
-                            "el => el.setAttribute('data-bot-uploaded', 'true')"
-                        )
+                        fields_filled += 1
+                        try:
+                            await locator.evaluate(
+                                "el => el.setAttribute('data-bot-uploaded', 'true')",
+                                timeout=2000,
+                            )
+                        except Exception:
+                            pass
 
                     elif action_type == "submit":
                         self._log(f"   финальная кнопка отправки [{bot_id}]")
