@@ -8,8 +8,7 @@ async def generate_cover_letter(
     company_name: str = "",
 ) -> str:
     """
-    Генерирует сопроводительное письмо под конкретную вакансию через LLM.
-    Возвращает текст письма.
+    генерирует сопроводительное письмо под конкретную вакансию через ллм, возвращает текст письма
     """
     print(
         f"[CoverLetter] Генерирую письмо под '{target_job}'"
@@ -19,7 +18,7 @@ async def generate_cover_letter(
     context = {
         "resume_text": resume_text,
         "target_job": target_job,
-        "vacancy_text": (vacancy_text or "")[:1500],
+        "vacancy_text": (vacancy_text or "")[:4000],
         "company_name": company_name,
     }
 

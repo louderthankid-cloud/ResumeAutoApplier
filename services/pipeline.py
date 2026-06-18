@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Awaitable, Callable
 
 import aiohttp
+from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Browser
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,7 @@ class CompanyLead(BaseModel):
     company_name: str
     site_url: str
     hh_url: str = ""
+    vacancy_id: str = ""
     vacancy_title: str | None = None
     vacancy_snippet: str | None = None
 
@@ -99,6 +101,33 @@ async def _hh_get(session, url: str, token_box: dict, params: dict | None = None
     headers["Authorization"] = f"Bearer {token_box['t']}"
     async with session.get(url, headers=headers, params=params) as r2:
         return r2.status, (await r2.json() if r2.status == 200 else None)
+
+
+def _strip_html(html: str) -> str:
+    """текст из HTML-описания вакансии (как в hh_adapter)"""
+    if not html:
+        return ""
+    return BeautifulSoup(html, "html.parser").get_text(separator="\n").strip()
+
+
+async def fetch_hh_vacancy_text(vacancy_id: str) -> str:
+    """полное описание вакансии с хх, нужно для письма"""
+    if not vacancy_id:
+        return ""
+    token = await hh_auth.get_access_token()
+    if not token:
+        return ""
+    token_box = {"t": token}
+    try:
+        async with aiohttp.ClientSession() as session:
+            status, data = await _hh_get(
+                session, f"{HH_API_BASE}/vacancies/{vacancy_id}", token_box
+            )
+    except Exception:
+        return ""
+    if status != 200 or not data:
+        return ""
+    return _strip_html(data.get("description") or "")
 
 
 async def load_from_hh(
@@ -187,6 +216,7 @@ async def load_from_hh(
                             company_name=edata.get("name", "Unknown"),
                             site_url=site,
                             hh_url=item.get("alternate_url", ""),
+                            vacancy_id=str(item.get("id") or ""),
                             vacancy_title=item.get("name"),
                             vacancy_snippet=_hh_snippet(item),
                         )
@@ -415,10 +445,13 @@ async def _process_company(
             if best_email:
                 log(f"[{task_id}] Отправляю письмо на {best_email}...")
                 try:
+                    vac_full = await fetch_hh_vacancy_text(lead.vacancy_id)
+                    vac_body = vac_full or lead.vacancy_snippet
+                    vac_ctx = "\n".join(p for p in (lead.vacancy_title, vac_body) if p)
                     letter = await generate_cover_letter(
                         resume_text=candidate.resume_text,
                         target_job=candidate.target_job,
-                        vacancy_text="",
+                        vacancy_text=vac_ctx,
                         company_name=company_name,
                     )
                     email_sent = await asyncio.to_thread(
