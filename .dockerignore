@@ -1,0 +1,35 @@
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# секреты и рантайм-артефакты 
+.env
+.env.*
+.hh_token.json
+
+# заметки и тесты
+scratch/
+test_scripts/
+
+# python-кэш
+__pycache__/
+*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# базы/чекпойнты/логи/выгрузки
+*.sqlite
+*.sqlite3
+logs/
+*.log
+*.csv
+*.jsonl
+results/
+
+# окружения
+.venv/
+venv/
+.idea/
+.vscode/
